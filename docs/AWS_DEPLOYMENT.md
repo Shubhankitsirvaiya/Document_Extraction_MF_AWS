@@ -90,6 +90,35 @@ The workflows use temporary GitHub OIDC credentials, not AWS access-key secrets.
 one AWS deployment role whose trust policy is restricted to the exact GitHub repository,
 then add these GitHub **Actions variables**:
 
+> **AWS Project account prerequisite:** the simplified AWS Project/free-plan environment
+> can apply organization Service Control Policies that deny CloudFormation stack
+> creation, ECR repositories, S3 buckets, and external IAM OIDC providers. In that case,
+> CDK bootstrap and GitHub OIDC cannot run until the account owner upgrades the account
+> and activates advanced AWS features. AWS documents that activation as irreversible;
+> it removes project spend limits and makes the owner responsible for normal usage
+> charges. Review billing, budgets, and idle resources before activating it.
+
+After advanced features are active, deploy the repository-scoped trust stack once:
+
+```powershell
+$env:AWS_PROFILE = "mf-prospectus-deployer"
+$env:AWS_REGION = "ap-southeast-2"
+$env:CDK_DEFAULT_REGION = $env:AWS_REGION
+$env:CDK_DEFAULT_ACCOUNT = "YOUR_12_DIGIT_ACCOUNT_ID"
+$env:GITHUB_REPOSITORY = "Shubhankitsirvaiya/Document_Extraction_MF_AWS"
+
+npx cdk bootstrap "aws://$env:CDK_DEFAULT_ACCOUNT/$env:CDK_DEFAULT_REGION"
+npx cdk deploy `
+  --app "uv run python -m infra.cicd_app" `
+  "mf-prospectus-dev-github" `
+  --require-approval broadening
+```
+
+The resulting `GitHubDeploymentRoleArn` output becomes the
+`AWS_DEPLOY_ROLE_ARN` repository variable. Its trust policy accepts only the exact
+repository `main` branch. The role has no `AdministratorAccess` policy; it can assume
+the account-local CDK bootstrap roles and push only to the project's UI ECR repository.
+
 - `AWS_ACCOUNT_ID`: the 12-digit project account.
 - `AWS_DEPLOY_ROLE_ARN`: the repository-scoped GitHub OIDC role.
 - `BEDROCK_MODEL_ID`: the verified Bedrock model or inference-profile ID.

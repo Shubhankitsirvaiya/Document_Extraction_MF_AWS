@@ -39,6 +39,10 @@ jobs:
       - name: Require explicit deployment confirmation
         shell: bash
         run: |
+          test "$GITHUB_REF" = "refs/heads/main" || {
+            echo "Deployment is restricted to the main branch."
+            exit 1
+          }
           test "${{ inputs.confirmation }}" = "DEPLOY" || {
             echo "Deployment cancelled: confirmation must be exactly DEPLOY."
             exit 1

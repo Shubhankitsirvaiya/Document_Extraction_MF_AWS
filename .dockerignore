@@ -3,7 +3,7 @@
 .env
 .venv
 node_modules
-cdk.out
+cdk.out*
 .aws
 __pycache__
 .pytest_cache
