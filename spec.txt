@@ -1,0 +1,483 @@
+MF PROSPECTUS RESTRICTION EXTRACTOR
+Implementation specification for GitHub Copilot
+Version: 2.0 | 1 November 2026
+
+This specification supersedes the earlier MF_Prospectus_AWS_Copilot_Plan.md wherever they differ. In particular: use Python AWS CDK and deployment helpers instead of manual resource creation; REMOVE Step Functions entirely; run one LangGraph agent on AgentCore Runtime; ECS/Fargate is only an optional Streamlit host.
+
+1. INSTRUCTION TO COPILOT
+
+Read this entire file before implementing. Create a working repository incrementally, with code, tests, infrastructure definitions and operational documentation. Do not deliver only another plan. Use one coherent dependency set and a committed lockfile. Implement checkpoints that run locally before cloud deployment.
+
+The user develops in VS Code and will use the AWS Toolkit extension to inspect/connect to AWS. The repository must contain an infrastructure/ folder defining all required resources and scripts for building, deploying, inspecting and cleaning them up. AWS Toolkit is a development interface, not the resource-provisioning engine. Use AWS CDK in Python, which synthesizes CloudFormation templates.
+
+This is an instruction to generate the project and deployment tools. Do not upgrade the AWS account, deploy billable infrastructure, execute paid model calls or destroy data merely while generating code. The user runs the documented deployment and paid smoke-test commands. No automatic deployment on clone, install, tests or editor startup. Normal resource updates should be repeatable; do not create a new bucket/queue/runtime on every run.
+
+2. PRODUCT GOAL
+
+A user uploads a mutual-fund prospectus PDF, at most 20 pages. The system extracts FUND-LEVEL investment restrictions, including exact source quotes, conditions/exceptions, physical page references and LLM-generated bounding boxes. A Streamlit UI displays restrictions and highlights the source evidence on the original document's rendered pages.
+
+Extraction logic:
+- Python PDF parsing first.
+- Regex rules select relevant pages and neighboring context.
+- A Bedrock vision model receives selected page images plus parsed text.
+- The model extracts restrictions AND predicts evidence bounding boxes.
+- One LangGraph agent controls all extraction stages.
+- Separate Lambda functions perform mandatory input validation and final output validation.
+
+This is a small learning/demo application, not an enterprise platform. The 20-page limit is hard. Support a single owner initially; keep ownership checks explicit so the app does not accidentally become publicly readable. No chat memory, retrieval/vector indexing, external website browsing or multiple autonomous agents are required.
+
+3. ACCOUNT, CREDIT AND COST CONTEXT
+
+The user has shown an AWS Free-plan account with USD 100 credits. The earlier screenshot advertised 1 May 2027 as the Free-plan end date. Recheck actual account status, balance, expiration and credit eligibility during setup; do not hardcode these into the application.
+
+AWS currently lists Bedrock AgentCore as Paid-plan exclusive. Remaining Free Tier credits carry over on an ordinary upgrade to the Paid plan and apply to eligible charges until expiration. Full AgentCore deployment therefore needs an account plan that allows it. Do not claim USD 100 is a guaranteed no-charge deployment or a hard spending cap. Charges not covered by credits, or after credits expire/run out, can be billed on the Paid plan.
+
+Use consumption-based AgentCore Runtime compute. Start Streamlit locally. Only enable continuously running ECS/Fargate UI infrastructure when the user chooses hosted UI. Set short log/artifact retention, low concurrency and bounded model calls. Avoid NAT Gateways, EKS, RDS, unused load balancers, provisioned model throughput and persistent AgentCore Instances capacity in the default demo.
+
+Create an optional AWS Budget with email notifications. Suggested demo budget: USD 10/month, configurable. Budget alerts are delayed monitoring, not spending enforcement. Do not launch RDS or other unrelated resources just to earn promotional credits. Show measured model usage and a rough per-job estimate using explicitly configured current prices; do not fabricate exact prices or remaining-credit API results.
+
+If AgentCore/model access is unavailable, report the blocker and allow local/mock operation. Never label local execution as AgentCore deployment. Do not silently substitute another model, Region or deployment target.
+
+4. FINAL ARCHITECTURE — NO STEP FUNCTIONS
+
+Submission path:
+Streamlit Python server -> IAM-authenticated API Gateway HTTP API -> API Lambda -> SQS -> dispatcher Lambda -> AgentCore Runtime.
+
+Processing path inside the ONE LangGraph agent:
+mandatory input-validator Lambda -> load/parse PDF -> regex page selection -> render pages -> Bedrock vision extraction -> bounded local validation/repair -> merge/deduplicate -> save candidate JSON -> mandatory output-validator Lambda -> persist final status -> completion event.
+
+Shared resources:
+- S3: original PDFs, parsed text, rendered pages, candidate/final JSON, validation reports, exports and reviewer decisions.
+- DynamoDB: job state, progress, attempt identity, lease, heartbeat and artifact references.
+- CloudWatch: structured logs, metrics and agent traces through appropriate instrumentation.
+- EventBridge: completion/failure routing for demonstration.
+- EventBridge Scheduler + reconciliation Lambda: detect abandoned uploads, failed dispatches and stuck processing; this is necessary because there is no independent Step Functions workflow manager.
+- Secrets Manager: genuine non-AWS credentials if introduced; optionally a clearly labeled demo secret for showing integration. AWS IAM role credentials are used for Bedrock/S3/etc.
+- Optional ECS/Fargate + ECR: Streamlit only, NOT the extraction agent.
+
+AgentCore Runtime does not need ECS or EKS to host the agent. Container-based AgentCore deployment may need ECR image storage, but that is not an ECS service. Prefer direct-code deployment when supported with the required native dependencies; otherwise use an AgentCore-compatible container.
+
+No extra FastAPI server. API Gateway uses Lambda handlers. Streamlit's backend makes signed AWS/API calls; do not make the browser hold AWS credentials.
+
+5. RESOURCE INVENTORY
+
+Required core resources, using project/environment-prefixed names:
+- One private S3 bucket.
+- One DynamoDB jobs table, partition key job_id string, initially no sort key or GSI.
+- One Standard SQS intake queue and one Standard dead-letter queue.
+- Five Lambda functions: api, dispatch, validate_input, validate_output, reconcile.
+- One API Gateway HTTP API with AWS_IAM authorization.
+- One AgentCore Runtime deployment and the endpoint needed by the current API.
+- Least-privilege execution roles, trust policies and API/service invocation permissions.
+- CloudWatch log groups with retention and alarms/dashboard.
+- One completion EventBridge bus/rule/log target.
+- One recurring EventBridge Scheduler schedule for reconcile, with its invocation role and appropriate failure handling.
+- Optional Secrets Manager secret, budget and Bedrock Guardrail, controlled by feature flags.
+
+Optional UI stack:
+- ECR image asset/repository, ECS cluster, Fargate task definition/service, security group and logs.
+- No EKS or duplicate agent service.
+- Public HTTPS hosting/authentication resources only if explicitly enabled/configured.
+
+Bedrock model access and provider prerequisites may require an account-level manual step. Do not pretend CloudFormation creates an arbitrary provider model subscription or resolves all access requirements.
+
+6. JOB LIFECYCLE AND API
+
+Routes:
+POST /jobs
+  Request: original_filename, content_type, size_bytes, optional process_all_pages.
+  Backend derives owner_id from authenticated request context. Client owner_id is never trusted.
+  Create UUID job_id and UPLOADING item. Return job_id and a short-lived upload URL for exactly jobs/{job_id}/input/document.pdf. Backend validates actual object size/content later; client-declared size is only an early check. Use a presigned upload mechanism supported by the chosen SDK and verify size after upload.
+POST /jobs/{job_id}/submit
+  Check owner and expected object. Conditionally transition to QUEUED and send a small SQS message. Return accepted status promptly. No PDF bytes in API Gateway JSON.
+GET /jobs/{job_id}
+  Check owner. Return status/progress, warnings, timestamps and short-lived artifact URLs when allowed. Never accept arbitrary bucket/key arguments.
+Optional POST /jobs/{job_id}/reviews
+  Check owner, restriction ID and review payload. Save reviewer decisions separately from machine output.
+
+States:
+UPLOADING, QUEUED, DISPATCHING, VALIDATING_INPUT, PARSING, SELECTING_PAGES, EXTRACTING, VALIDATING_OUTPUT, COMPLETED, COMPLETED_WITH_WARNINGS, REJECTED, FAILED.
+Terminal states: COMPLETED, COMPLETED_WITH_WARNINGS, REJECTED, FAILED. A user retry creates a new job_id. Do not rerun a terminal job by resetting its status.
+
+DynamoDB fields:
+job_id, owner_id, status, stage, created_at, updated_at, expires_at, input_key, input_sha256, page_count, selected_pages, process_all_pages, progress, result_key, warnings_count, error_code, error_message, correlation_id, attempt_id, runtime_session_id, dispatch_lease_expires_at, processing_lease_expires_at, heartbeat_at, deadline_at, model_calls, usage, completion_event_state.
+
+Store large text/images/results in S3. DynamoDB contains bounded metadata. TTL is asynchronous cleanup, not exact scheduling or a job timeout mechanism. Match TTL/artifact retention and report expired results gracefully.
+
+7. QUEUE, DISPATCH AND BACKGROUND EXECUTION
+
+SQS messages contain job_id/correlation_id, not PDF data or secrets. Dispatcher loads authoritative ownership/input references from the jobs table.
+
+Standard queues can deliver duplicates. Use conditional updates and explicit attempt identity. Suggested semantics:
+- Dispatcher conditionally admits a queued job, sets an attempt UUID and deterministic runtime session UUID, DISPATCHING state and a short dispatch lease.
+- A duplicate message for a terminal or already-running job is acknowledged without starting another logical extraction.
+- For an active dispatch lease with no confirmed start, leave/retry the message rather than acknowledge and lose recovery.
+- Agent starts by conditionally claiming the current attempt from DISPATCHING. Exactly one entrypoint invocation acquires the RUNNING/VALIDATING_INPUT ownership. Duplicate invocations return already accepted/running without executing the graph again.
+- Admission must finish before returning ACCEPTED. Register the tracked background task and release/fail admission appropriately if starting that task fails.
+- An invocation response timeout is ambiguous. Inspect job status/attempt before retrying using the same attempt/session. Never blindly start an unrelated session.
+- Dispatcher acknowledges a message only after confirmed acceptance, a confirmed already-running equivalent attempt, or a terminal result. Enable SQS partial-batch response semantics even if initial batch size is one.
+- Expired dispatch leases allow bounded redelivery/admission recovery. Document exact race-safe conditions; do not clear a lease belonging to an active running attempt.
+
+AgentCore entrypoint returns ACCEPTED quickly and performs extraction using the current SDK's tracked background-task mechanism/HealthyBusy lifecycle. An async def by itself is not independent background execution. Blocking PDF/model work must not block the runtime health endpoint. Use a thread/task executor appropriate to the SDK, and always finish task tracking in finally.
+
+The agent writes periodic heartbeat (e.g. every 30 seconds through a background mechanism, not only between lengthy calls), progress and an application deadline (suggested 20 minutes). State writes require matching attempt_id and nonterminal status. This fences late workers from overwriting a timeout/failure. Bedrock call/connect/read timeouts must fit the application budget.
+
+Important reliability boundary: this v1 provides one logical job with deduplicated admission, not a proof of exactly-once external model execution. Network ambiguity/crashes can still cause a repeated model call. Keep that limitation explicit and checkpoint completed page batches to S3.
+
+Reconcile runs about once a minute. For this tiny demo it may scan the table with pagination/projection; document the small-scale limit and add a status/time index before larger scale. It detects:
+- abandoned uploads after a configured grace period;
+- QUEUED jobs never sent/accepted due to non-atomic DynamoDB/SQS operations;
+- expired DISPATCHING leases;
+- stale processing heartbeats and expired deadlines;
+- terminal jobs whose completion event was not published.
+
+Bound resend attempts. Once a processing attempt is stale, mark FAILED rather than automatically launching unlimited paid inference. User retries create a new job. Conditional failure update must not overwrite a recently refreshed heartbeat or newer attempt. Best-effort stop/cancel runtime if supported, but correctness must rely on fencing and deadline checks, not guaranteed cancellation of an in-flight model request.
+
+DynamoDB and SQS are not one transaction. Submission uses QUEUED plus recoverable enqueue metadata; reconciliation handles missed sends. Duplicate sends are safe at admission. Emit completion events after final status; store a pending-event marker and let reconcile retry failed publication. Consumers tolerate duplicate events. Event delivery failure does not reverse successful extraction.
+
+8. INPUT VALIDATION LAMBDA
+
+Default project limits:
+- 1–20 physical pages inclusive.
+- 20 MiB maximum PDF upload, configurable.
+- Reject corrupt/unreadable, zero-page and password-protected/encrypted PDF in v1.
+- Check actual PDF content with parser, not only extension or browser MIME.
+- Bound page dimensions, image render megapixels, parse time and memory use.
+- Compute SHA-256, page count, per-page text availability, rotation and dimensions.
+- Scanned/low-text pages are allowed, routed to vision. Do not silently drop them.
+- Save machine-readable validation report; update validated metadata under current attempt.
+- Reject before Bedrock inference. Report friendly error codes.
+
+Use PyMuPDF initially; build its native dependency for the Lambda architecture/runtime. Keep validation packages small and independent of LangGraph/Streamlit. Review its licensing before commercial distribution. Return explicit ok/errors/warnings rather than treating HTTP 200 or a Lambda invocation success as document validity. Inspect Lambda FunctionError and response body in callers.
+
+9. SINGLE LANGGRAPH AGENT
+
+Graph stages are deterministic required nodes around bounded model calls:
+validate_input -> parse -> select_pages -> render -> extract_batches -> validate_or_repair -> merge -> persist_candidate -> validate_output -> finalize.
+
+Rejected input exits REJECTED. Runtime/tool/schema failures exit FAILED with structured errors. Valid but uncertain evidence can end COMPLETED_WITH_WARNINGS. Do not make validators optional tools that the model may choose not to call. There is one agent, not one agent per page or stage.
+
+Graph state includes job/attempt IDs, metadata/artifact references, selected pages, batch progress, extracted restriction records, warnings, call/token counters and deadline. Do not put binary PDF/image payloads into DynamoDB or routine logs. Persist completed batch outputs for diagnostics and possible explicit future recovery.
+
+10. PARSING AND REGEX SELECTION
+
+Use PyMuPDF to extract text and render pages. Store pages.json with 1-based physical page_number, optional printed page label, raw/normalized text, width/height, rotation, crop/render transform, text character count and image artifact reference.
+
+Regex configuration is editable YAML. Cover headings and phrases such as investment restrictions/limitations, borrowing, leverage, derivatives, concentration, diversification, eligible investments, maximum/minimum, shall not/may not/must not/prohibited and percentages. Normalize whitespace; match ignoring case.
+
+Store selection reasons/hits for transparency. Include neighboring pages to capture continued clauses and fund headings. Include all low-text/scanned pages. If no pages match, fall back to all pages. Provide user-visible process_all_pages mode for recall evaluation. Regex is a heuristic; exclusion does not prove a page has no restrictions.
+
+Track fund headings/context across pages. A prospectus may describe multiple funds; do not assume one fund for the document. Distinguish FUND, UMBRELLA, SHARE_CLASS and UNKNOWN scope. Preserve ambiguity and flag review. Do not arbitrarily attribute an umbrella rule to a fund unless source supports it.
+
+11. BEDROCK VISION EXTRACTION AND BOUNDING BOXES
+
+MODEL_ID/inference-profile identifier is configured, never invented. Verify image-input and chosen API support, Region, permissions and provider prerequisites. Use Converse for a compatible selected model; do not assume every model supports the same tool/JSON/image features.
+
+Send images AND parsed text. Text alone does not encode page layout. Default to batches of one or two page images, with fund/header context. Respect current model/API image, context and output-token limits; compress/resize before inference. Do not send all 20 pages in one request just because a generic API envelope permits 20 images.
+
+The model extracts:
+- fund and scope;
+- restriction category and wording;
+- operator/threshold/unit/denominator where source explicitly supplies them;
+- conditions and exceptions;
+- exact evidence quote;
+- physical page number and one or more evidence boxes;
+- uncertainty and review reasons.
+
+Do not turn objectives, risk disclosures or marketing into binding restrictions. Preserve permissions versus prohibitions. Do not invent denominators/thresholds or omit qualifying exceptions. Treat uploaded document content as data, not system instructions.
+
+BBOX CONTRACT:
+- Coordinates originate from the model, bbox_source=LLM.
+- Normalized [x_min,y_min,x_max,y_max], all finite values in [0,1].
+- Origin top-left of the supplied upright page raster.
+- x_min < x_max and y_min < y_max.
+- Physical 1-based page_number, not the printed page label.
+- Multiple evidence regions/pages allowed for a restriction.
+- UI overlays on the same raster with the same aspect ratio and transform.
+- Pixel coordinates derive from normalized values times displayed width/height.
+
+Python may validate bounds and transform coordinates for display; do not replace LLM predictions using PyMuPDF search/word boxes without a future explicit change in requirements. The current request is specifically LLM-generated boxes. Quote/text support checks are allowed but cannot silently redefine box provenance.
+
+Allow no box if localization is uncertain, with needs_review and a reason. Do not invent/clamp coordinates to pass validation. Every unreviewed LLM box begins UNVERIFIED. In-bounds geometry is not evidence that a box is accurate. Store source image dimensions and transforms. Annotated PDF export is optional later and must correctly invert page rotation/cropping transforms; initial v1 highlights page images only.
+
+Budget model calls: configurable selected-batch count, conservative output tokens, bounded transient retries and at most one repair call per batch. Implement call-count and deadline circuit breakers. Partial batch failures are visible and prevent unqualified COMPLETED. No full-document re-extraction loop on output validation failure. Model-reported confidence is uncalibrated; do not advertise it as accuracy.
+
+12. OUTPUT SCHEMA AND FINAL VALIDATOR
+
+Use Pydantic schemas with schema_version. Suggested structure:
+{
+  "schema_version": "1.0",
+  "job_id": "uuid",
+  "attempt_id": "uuid",
+  "document": {"sha256": "hash", "page_count": 12},
+  "coverage": {"mode": "regex_plus_neighbors", "selected_pages": [3,4], "failed_pages": []},
+  "restrictions": [{
+    "restriction_id": "r-001",
+    "fund_name": "Example Fund",
+    "scope": "FUND",
+    "category": "BORROWING",
+    "restriction_text": "Borrowing must not exceed 10% of NAV.",
+    "operator": "<=", "threshold": 10, "unit": "PERCENT", "denominator": "NAV",
+    "conditions": [], "exceptions": [],
+    "evidence": [{"page_number": 4, "quote": "Borrowing must not exceed 10% of NAV.",
+      "bboxes": [[0.10,0.35,0.88,0.41]], "bbox_source": "LLM", "localization_status": "UNVERIFIED"}],
+    "needs_review": true, "review_reasons": ["Visual alignment not human-confirmed"]
+  }],
+  "warnings": [],
+  "usage": {"model_id": "configured-real-id", "calls": 2, "input_tokens": null, "output_tokens": null}
+}
+This example is illustrative, not a verified extraction. Null fields remain unknown. Ambiguous scope and unlocalized evidence must have explicit reasons.
+
+Output Lambda independently validates candidate JSON against trusted S3/input metadata:
+- schema/types/finite numeric values;
+- job_id, attempt_id, input hash and page_count match;
+- pages exist and images/transforms match known metadata;
+- bbox bounds/order, suspicious page-sized boxes, empty evidence and duplicate records;
+- thresholds/units/denominators are not silently defaulted;
+- all selected batches accounted for;
+- exact/normalized quote support against parsed text where possible;
+- warnings for scanned quotes that cannot be independently checked.
+
+Return explicit ok/errors/warnings and validation artifact key. Save final result only on accepted output, with warnings retained. Caller must inspect FunctionError, parse the report and never infer validity from invocation success. Validator failure produces FAILED; recoverable uncertainty produces COMPLETED_WITH_WARNINGS according to documented policy. Human-reviewed accuracy is separate from structural validation. Only after this node may agent finalize a successful job.
+
+13. STREAMLIT UI
+
+Views/tabs:
+- Upload: PDF limit, filename/size/pages preview, process-all toggle, submit and readable errors.
+- Jobs: current stage/progress/timestamps and status recovery after UI refresh via stored job ID.
+- Results: fund/category/review filters, restriction table and CSV/JSON downloads.
+- Evidence: selected restriction, physical page navigation, translucent model boxes, quote, exception/condition details and uncertainty flags.
+- Pipeline: parser/regex decisions, selected versus excluded pages, validation reports, bounded model usage and correlation IDs. Raw result JSON on demand.
+- AWS architecture/demo: actual deployed resource names and enabled components; explicitly mark local/mock/disabled integrations.
+
+Manual review accepts/rejects/comments on a finding. Store separately from raw output and distinguish machine status from reviewer approval. Never claim a human review occurred without an actual action.
+
+Use supported periodic fragment/refresh mechanisms for the pinned Streamlit version; no infinite while loop blocking UI. Poll every ~3–5 seconds, back off, stop at terminal state. Widget reruns must not resubmit jobs or rerun extraction. Cache per-job pages without cross-user data leakage. Persist job ID in an appropriate URL/query/session mechanism with server-side ownership checks. Do not log/display secrets or presigned URLs in debug panels.
+
+14. VS CODE, AWS AUTHENTICATION AND ENV FILES
+
+Document prerequisites: Python, compatible Node.js for CDK CLI, AWS CLI v2, VS Code, AWS Toolkit, Git and Docker only when the selected packaging mode needs it. Explain installation and verification for Windows/PowerShell and bash/WSL as relevant. Prefer Python helper scripts for portability.
+
+Use an AWS named profile, preferably short-lived sign-in/SSO credentials where the account setup supports them. Explain available account-specific sign-in options without assuming IAM Identity Center is already configured. The Toolkit's selected connection does not automatically prove the terminal/SDK is using that identity. Verify both using sts:GetCallerIdentity with the selected profile.
+
+.env.example contains placeholders, not credentials:
+APP_MODE=local_mock
+AWS_PROFILE=mf-dev
+AWS_REGION=ap-south-1
+EXPECTED_AWS_ACCOUNT_ID=
+PROJECT_NAME=mf-prospectus
+ENVIRONMENT=dev
+BEDROCK_MODEL_ID=
+MAX_PDF_PAGES=20
+MAX_UPLOAD_MIB=20
+MODEL_PAGE_BATCH_SIZE=2
+MAX_JOB_SECONDS=1200
+MAX_ACTIVE_JOBS=1
+ENABLE_SECRET_DEMO=false
+ENABLE_GUARDRAIL=false
+ENABLE_ECS_UI=false
+BUDGET_USD=10
+BUDGET_EMAIL=
+# Filled by deployment output export, not manually guessed:
+API_BASE_URL=
+S3_BUCKET_NAME=
+DYNAMODB_TABLE_NAME=
+SQS_QUEUE_URL=
+AGENTCORE_RUNTIME_ARN=
+APP_SECRET_ARN=
+
+Local settings explicitly load .env using dotenv (or equivalent), then generated nonsecret deployment outputs, then documented explicit overrides. Define one precedence order and test it. AWS CLI/CDK/Toolkit do not all automatically load .env. Deployment scripts must read it explicitly and pass --profile/--region or a boto3 Session consistently. Check account identity against EXPECTED_AWS_ACCOUNT_ID before mutating cloud resources. Do not overwrite user-entered secrets/config when exporting generated outputs.
+
+Never put AWS_ACCESS_KEY_ID/AWS_SECRET_ACCESS_KEY or session tokens into example files, committed .env, Docker images or generated outputs. If the user uses a credentials profile, keep credentials in standard AWS-managed local locations, not project code. Exclude .env, cdk.out, local PDFs/artifacts, caches and generated sensitive logs from Git.
+
+Cloud runtimes use IAM execution/task roles and the default credential chain. Do not propagate AWS_PROFILE into Lambda, AgentCore or ECS where that laptop profile does not exist. Configuration identifiers are safe to pass as environment variables; secret values are retrieved from Secrets Manager by the authorized role. No separate provider key is required for normal IAM-authenticated Bedrock calls.
+
+15. INFRASTRUCTURE AS CODE
+
+Use one core CDK stack with modular constructs and a separate optional UI stack to avoid circular cross-stack dependencies. Python modules separate storage, IAM, Lambdas, API, queue, AgentCore and monitoring concerns. Pin compatible CDK library and CLI versions. Use current official constructs, falling back to documented L1 CloudFormation constructs if needed. Do not invent APIs from older alpha packages. Resolve current AgentCore SDK/deployment contracts before implementation.
+
+CDK creates roles/connections/policies, packages assets, exports resource identifiers and supports updates. Bootstrap the target account/Region explicitly. Explain that bootstrap resources can persist after app-stack deletion and may incur asset storage charges. Source changes create new assets/versions, not duplicate logical infrastructure.
+
+S3 private, Block Public Access enabled, ACLs disabled, encryption enabled, short configurable lifecycle. Versioning optional/off by default for cost control; if enabled, configure noncurrent-version cleanup. DynamoDB on-demand, TTL enabled, no paid replication/backups by default. SQS source retention ~1 day, DLQ ~4 days, redrive after ~5 attempts. Intake visibility >= guidance for the dispatch Lambda timeout and batching window; default dispatch timeout 30s and queue visibility 180s, tune based on actual SDK response times. Batch size one initially. Limit concurrency and add admission checks for MAX_ACTIVE_JOBS, using a race-safe mechanism if enforcing it strictly; do not claim reserved Lambda concurrency alone limits already-running AgentCore jobs.
+
+Lambda starting defaults: api 256–512 MB/30s; dispatch 512 MB/30s; input validator 1024 MB/60s; output validator 512 MB/60s; reconcile 256–512 MB/60s. Measure and adjust. Compatible native PDF wheels must be built for deployment architecture/OS. Code package builds must not depend on unrelated UI/agent dependencies.
+
+AgentCore: serverless microVM deployment, IAM auth, wrapper entrypoint/background tracking, runtime role and conservative lifecycle settings. The direct-code vs container decision is made using actual dependency compatibility. For container deployment CDK can manage build/image assets where supported. No double ownership: do not have CDK and a separate CLI both create the same runtime under different names. If a deployment-only feature requires an SDK helper, define/document ownership and update/delete semantics clearly.
+
+API: HTTP API, Lambda proxy integration, AWS_IAM auth on all routes; Python Streamlit server signs requests using a maintained SigV4 implementation and credentials that refresh. Do not create a static shared header as a substitute for IAM. One owner demo mapping from trusted principal configured consistently. CORS only if a real browser-direct architecture needs it; default backend-to-backend calls do not.
+
+IAM roles separately scoped for API, dispatch, validators, reconcile, AgentCore, Scheduler and optional ECS. Document trust policy versus permission policy. Resource-scope table/bucket prefixes/queue/functions/runtime/model/inference profiles where supported. Restrict AgentCore's invocation of validators to the two exact functions. Only API/owner role can issue permitted uploads/download URLs. Only agent/reconciler updates lifecycle according to conditional rules. No AdministratorAccess on workload roles. Model invocation permissions must cover actual model/profile resources and any configured cross-Region routing, not wildcard everything.
+
+Secrets Manager optional demo: a non-production dummy marker stored/read to demonstrate service integration, or a real external-service secret if one is actually introduced. Clearly label the marker as demonstration only. Never suggest Bedrock needs a secret API key. Do not generate unused rotation functions or custom KMS infrastructure.
+
+CloudWatch log retention ~7 days, structured job/stage/attempt/correlation fields. No full document/base64/model payload logging by default. Instrument model/tools/nodes using supported OpenTelemetry/framework integration. Configure required telemetry delivery policies/Transaction Search as documented. Dashboard shows real available metrics only. Alarms include Lambda errors, SQS DLQ count, queue age and stale job metric. Trace data is execution telemetry, not evidence of answer accuracy.
+
+Completion EventBridge rule targets CloudWatch Logs for the demo, with required resource policy. Scheduler invokes reconcile, not the completion bus. Keep their roles distinct. Do not send email/Slack notifications unless configured/requested beyond budget alerts.
+
+16. OPTIONAL ECS STREAMLIT HOSTING
+
+Default ENABLE_ECS_UI=false. Local Streamlit uses real cloud backend after core deployment and is enough to demonstrate the extraction project.
+
+When enabled, run only Streamlit on ECS/Fargate with a task role allowed to invoke the API and an execution role for image pulls/logging. Bind 0.0.0.0:8501. Start with measured task sizing, e.g. 0.5 vCPU/1 GB if suitable, desired count one during a demo and zero afterward. Do not store AWS keys in task environment. UI image architecture must match task configuration.
+
+A low-cost temporary demonstration can use task public IPv4 in a public subnet, security-group access restricted to the user's current /32 IP, no ALB/NAT and only public/synthetic documents because transport is plain HTTP. Document its limitations and public-IP/compute/log/ECR charges. Do not use that option for confidential prospectuses.
+
+For confidential/multi-user hosted use, require an explicit HTTPS/authentication design, e.g. ALB+ACM+domain and supported user auth, with WebSocket/idle-timeout settings suitable for Streamlit. Make the additional resources and costs opt-in. Do not invent a free HTTPS URL or silently create a NAT Gateway. Updating ECS count to zero does not remove ALB or other ongoing charges.
+
+17. REQUIRED REPOSITORY STRUCTURE
+
+mf-prospectus/
+  spec.txt
+  README.md
+  pyproject.toml
+  dependency lockfile
+  .env.example
+  .gitignore
+  config/
+    page_selection_rules.yaml
+    settings.example.yaml
+  app/
+    common/          # config, schemas, structured logging, AWS sessions, status
+    parsing/         # PDF parser, regex selection, render transforms
+    agent/           # graph, nodes, prompts, model adapter, runtime entrypoint
+    validation/      # shared deterministic input/output checks
+    ui/              # Streamlit, signed API client, page overlays, progress
+  lambdas/
+    api/
+    dispatch/
+    validate_input/
+    validate_output/
+    reconcile/
+  infrastructure/
+    app.py
+    cdk.json
+    stacks/core_stack.py
+    stacks/ui_stack.py
+    constructs/      # modular resource definitions
+    policies/        # explanatory policy examples if helpful
+    scripts/
+      check_prerequisites.py
+      verify_account.py
+      bootstrap.py
+      build_packages.py
+      synth.py
+      diff.py
+      deploy.py
+      export_outputs.py
+      smoke_test.py
+      stop_demo.py
+      destroy.py
+    docker/          # optional agent/UI/package build images
+  scripts/
+    run_local.py
+    run_ui.py
+    evaluate.py
+  tests/
+    unit/
+    integration/
+    fixtures/        # generated synthetic PDFs, annotated expected evidence
+  docs/
+    setup_vscode_aws.md
+    deployment.md
+    architecture.md
+    operations.md
+    evaluation.md
+    cleanup.md
+  generated/         # ignored deployment outputs/local artifacts
+
+Structure may be adjusted for Python packaging conventions, but preserve clear app/Lambda/infrastructure boundaries. Do not create hundreds of boilerplate files with no behavior.
+
+18. COMMAND AND DEPLOYMENT EXPERIENCE
+
+README gives exact working commands for the selected environment. Helpers should expose consistent options such as --profile, --region, --environment and --ui. Commands are project interfaces to implement, not assumed existing AWS SDK APIs.
+
+Sequence:
+1. Create virtual environment/install locked dependencies and tools.
+2. Copy .env.example to .env; select named profile/Region/account.
+3. Authenticate through the appropriate AWS profile mechanism.
+4. verify_account: print account ID, principal and Region, never secret credentials.
+5. run_local in mock mode; run tests, preview highlights.
+6. build_packages: produce compatible Lambda/runtime artifacts.
+7. bootstrap: explicit CDK bootstrap action for the target environment.
+8. synth: generate templates without deploying or calling the model.
+9. diff: display resource/permission changes.
+10. deploy core: create/update core stack and export nonsecret outputs.
+11. model/runtime preflight: report access blockers; explicitly user-run real one-page smoke test.
+12. run_ui against AWS backend and process one <=20-page PDF.
+13. optionally deploy UI stack; show actual endpoint/access prerequisites.
+14. stop_demo: scale UI down/stop sessions where supported, without deleting data.
+15. destroy: clearly report retained versus deleted resources; require explicit flag for purging user data, no unconditional recursive deletion.
+
+Document which steps are manual: account plan upgrade, account authentication, provider prerequisites/terms, choosing real model/Region, optional budget email/domain/certificate inputs. Everything else repeatable through code where supported. Deployment exports populate configuration automatically and do not require copying each ARN manually. Never infer success from an empty CLI output; inspect stack/deployment state and run a bounded health check.
+
+19. IMPLEMENTATION PHASES
+
+Phase 1: typed schemas/config + synthetic fixtures + parsing/selection/rendering + tests.
+Phase 2: mock extraction + fully usable Streamlit table/evidence overlays + local background-job service.
+Phase 3: real Bedrock adapter + one LangGraph graph + deterministic validators. Real calls only through explicit smoke-test/run commands.
+Phase 4: Lambda packaging + API/SQS/DynamoDB contracts + AgentCore background execution, conditional admission, heartbeat/deadline/fencing and reconciliation.
+Phase 5: Python CDK core stack, IAM, telemetry, completion routing, deployment helpers and exported config.
+Phase 6: end-to-end smoke tests + evaluation + operational cleanup guide.
+Phase 7: optional ECS/Fargate UI deployment.
+
+For each phase report what works, how to run it, tests performed and remaining blockers. Avoid replacing required behavior with TODOs or mock success in AWS mode. If a feature is optional, explicitly disable/label it. Prioritize the complete local user experience before creating infrastructure.
+
+20. TESTS AND ACCEPTANCE
+
+Unit/contract tests, without paid APIs:
+- valid 1-page and 20-page PDFs accepted; 21-page, zero-page, corrupt, encrypted and oversized rejected before inference;
+- low-text/scanned pages included in vision path;
+- regex hits, neighboring pages, no-match fallback and process-all behavior;
+- two-column, rotated/cropped pages, multi-fund scope, exceptions and cross-page evidence;
+- normalized bbox overlay pixel transformation with known synthetic geometry;
+- invalid/huge boxes, missing quote/page, NaN/numeric issues and malformed JSON;
+- one repair maximum and capped retries/calls;
+- Lambda FunctionError and invalid validation report handling;
+- duplicate submit/SQS invocation and lost dispatch response;
+- stale heartbeat/lease/deadline, terminal-state fencing and late writes;
+- reconcile enqueue/event retries, partial-batch failures and DLQ behavior;
+- ownership checks, arbitrary key rejection, config precedence and missing credentials errors;
+- UI rerun does not start extraction twice;
+- infrastructure assertions: no Step Functions/EKS/NAT default, private bucket, IAM auth, retention, required roles/queue mappings and optional UI disabled.
+
+Integration tests use mocks/emulators where feasible; label emulator gaps. Live tests are explicitly opt-in. Do not claim emulator success proves AgentCore SDK/runtime compatibility.
+
+End-to-end acceptance:
+Upload -> immediate job ID -> visible stages -> final output -> selectable evidence highlights -> results survive UI refresh -> logs correlate by job ID. Invalid PDF never invokes Bedrock. Uncertain/missing localization is visible. Cloud mode demonstrably invokes AgentCore. Agent crash yields a terminal failure through reconciliation, not endless polling. All deployed resources are discoverable from exported names/ARNs.
+
+Evaluation:
+Use a small public/synthetic manually labeled set, with human-reviewed restrictions and evidence boxes. Measure restriction precision/recall, fund-scope accuracy, numeric/exception correctness, evidence-page correctness and box overlap/visual alignment. Do not claim a target accuracy before measuring. Compare regex selection with all-page processing to quantify missed restrictions. Schema validation, trace success and model confidence do not substitute for these quality measurements.
+
+21. WHAT NOT TO ADD TO V1
+
+No Step Functions, EKS, multi-agent architecture, RAG/Knowledge Bases/vector database, AgentCore Memory, Browser, Code Interpreter, Gateway or Policy solely for showcasing. The extractor uses deterministic internal functions and mandatory validators. Explain unused services in the demo rather than creating fake integrations. Optional future Gateway can expose a real read-only tool, but is not required now.
+
+No permanent AWS keys in .env, no public S3 bucket, no API without authorization, no unbounded retries or unrestricted paid smoke tests. Do not replace model-generated bounding boxes with parser-generated boxes without an explicit future change.
+
+22. CLEANUP AND COST VISIBILITY
+
+Provide a resource inventory and cleanup order. Stop runtime sessions/UI tasks; remove optional ALB/NAT/public network resources if created; review image/assets storage; delete queues/schedules/rules/API/Lambdas/runtime as owned by the stack; handle S3 versions/objects, DynamoDB data, secrets and logs according to explicit retention/purge options. Report retained resources and bootstrap assets after destroy. Do not promise cdk destroy deletes retained data or every billable resource.
+
+Display actual usage counters and deployment mode in UI. Budget alerts are not spending caps. Keep the default stack small enough for learning; measure a one-page real run before scaling to 20 pages or repeated documents.
+
+23. OFFICIAL REFERENCES TO VERIFY DURING IMPLEMENTATION
+
+AWS Free Tier and credit carryover:
+https://aws.amazon.com/free/
+https://aws.amazon.com/free/free-tier-faqs/
+AgentCore Runtime deployment/async processing:
+https://docs.aws.amazon.com/bedrock-agentcore/latest/devguide/runtime-get-started-code-deploy.html
+https://docs.aws.amazon.com/bedrock-agentcore/latest/devguide/runtime-long-run.html
+AgentCore Regions and observability:
+https://docs.aws.amazon.com/bedrock-agentcore/latest/devguide/agentcore-regions.html
+https://docs.aws.amazon.com/bedrock-agentcore/latest/devguide/observability-get-started.html
+CloudFormation/CDK runtime support:
+https://docs.aws.amazon.com/AWSCloudFormation/latest/TemplateReference/aws-resource-bedrockagentcore-runtime.html
+https://docs.aws.amazon.com/cdk/api/v2/docs/aws-cdk-lib.aws_bedrockagentcore-readme.html
+Bedrock model access and Converse image request contract:
+https://docs.aws.amazon.com/bedrock/latest/userguide/model-access.html
+https://docs.aws.amazon.com/bedrock/latest/APIReference/API_runtime_Message.html
+SQS Lambda integration:
+https://docs.aws.amazon.com/lambda/latest/dg/services-sqs-configure.html
+
+Implementation must consult current official documentation for library versions, exact SDK calls, supported packaging, account restrictions and model/API availability. This file defines project behavior; it does not override AWS service constraints. If any assumption cannot be met, state the concrete issue and implement an explicitly labeled supported path.

@@ -1,0 +1,12 @@
+{
+  "name": "mf-prospectus-cdk-tooling",
+  "private": true,
+  "version": "0.1.0",
+  "devDependencies": {
+    "aws-cdk": "2.1147.0"
+  },
+  "scripts": {
+    "cdk": "cdk"
+  }
+}
+

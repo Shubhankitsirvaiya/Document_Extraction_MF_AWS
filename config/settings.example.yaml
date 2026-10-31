@@ -1,0 +1,13 @@
+app_mode: aws
+project_name: mf-prospectus
+environment: dev
+aws_region: ap-south-1
+max_pdf_pages: 20
+max_upload_mib: 20
+model_page_batch_size: 2
+max_model_calls: 12
+max_job_seconds: 1200
+max_active_jobs: 1
+artifact_retention_days: 7
+enable_ecs_ui: true
+

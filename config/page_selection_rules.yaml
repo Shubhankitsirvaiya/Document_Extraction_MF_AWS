@@ -1,0 +1,37 @@
+version: "1.0"
+neighbor_radius: 1
+low_text_threshold: 80
+patterns:
+  - id: restriction_heading
+    label: Investment restrictions or limitations heading
+    regex: "\\b(investment\\s+(restrictions?|limitations?)|fundamental\\s+restrictions?)\\b"
+    weight: 5
+  - id: prohibition
+    label: Binding prohibition language
+    regex: "\\b(shall\\s+not|may\\s+not|must\\s+not|prohibited|is\\s+not\\s+permitted)\\b"
+    weight: 4
+  - id: borrowing
+    label: Borrowing or leverage
+    regex: "\\b(borrow(?:ing)?|leverage|senior\\s+securit(?:y|ies))\\b"
+    weight: 3
+  - id: derivatives
+    label: Derivatives
+    regex: "\\b(derivatives?|futures?|options?|swaps?)\\b"
+    weight: 2
+  - id: concentration
+    label: Concentration or diversification
+    regex: "\\b(concentrat(?:e|ion)|diversif(?:ied|ication)|single\\s+issuer)\\b"
+    weight: 3
+  - id: eligible_investments
+    label: Eligible investments
+    regex: "\\b(eligible\\s+investments?|permitted\\s+investments?)\\b"
+    weight: 2
+  - id: numeric_limit
+    label: Numeric threshold
+    regex: "(?:\\b(maximum|minimum|exceed|at\\s+least|not\\s+more\\s+than)\\b|\\b\\d+(?:\\.\\d+)?\\s*%)"
+    weight: 3
+  - id: fund_heading
+    label: Fund heading
+    regex: "(?im)^(?:fund|portfolio)\\s*[:\\-]\\s*[A-Z][^\\n]{2,100}$"
+    weight: 2
+
