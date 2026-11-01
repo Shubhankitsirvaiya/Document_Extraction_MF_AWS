@@ -9,6 +9,7 @@ __pycache__/
 htmlcov/
 .streamlit/secrets.toml
 node_modules/
+slides/
 cdk.out*/
 generated/*
 !generated/.gitkeep
