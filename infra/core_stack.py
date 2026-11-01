@@ -39,9 +39,6 @@ from aws_cdk import (
     aws_dynamodb as dynamodb,
 )
 from aws_cdk import (
-    aws_ecr as ecr,
-)
-from aws_cdk import (
     aws_events as events,
 )
 from aws_cdk import (
@@ -97,6 +94,19 @@ class ProspectusCoreStack(Stack):
             raise ValueError(
                 "BEDROCK_MODEL_ID must be set in .env before synthesizing the AWS-only stack"
             )
+        model_resource_arns = [
+            item.strip()
+            for item in str(
+                self.node.try_get_context("bedrock_model_resource_arns")
+                or os.getenv("BEDROCK_MODEL_RESOURCE_ARNS", "")
+            ).split(",")
+            if item.strip()
+        ]
+        if not model_resource_arns:
+            raise ValueError(
+                "BEDROCK_MODEL_RESOURCE_ARNS must list the exact inference-profile and "
+                "foundation-model ARNs used by BEDROCK_MODEL_ID"
+            )
 
         # Data boundary: private, encrypted artifacts expire automatically; the job
         # table is on-demand and uses the same TTL timestamp as the application.
@@ -128,26 +138,6 @@ class ProspectusCoreStack(Stack):
             ),
             time_to_live_attribute="expires_at",
             removal_policy=RemovalPolicy.RETAIN,
-        )
-
-        # GitHub Actions builds the Streamlit image and pushes a commit-SHA tag to
-        # this repository. CDK therefore never needs a local Docker daemon. Keeping
-        # the repository in the core stack makes it available before the optional
-        # Fargate UI stack is synthesized and deployed.
-        ui_repository = ecr.Repository(
-            self,
-            "UiRepository",
-            repository_name=f"{prefix}-ui",
-            image_scan_on_push=True,
-            image_tag_mutability=ecr.TagMutability.IMMUTABLE,
-            lifecycle_rules=[
-                ecr.LifecycleRule(
-                    description="Keep only the latest 20 commit images",
-                    max_image_count=20,
-                )
-            ],
-            empty_on_delete=True,
-            removal_policy=RemovalPolicy.DESTROY,
         )
 
         # Queue boundary: failed dispatches are isolated in a DLQ instead of being
@@ -287,15 +277,39 @@ class ProspectusCoreStack(Stack):
             "AgentRuntimeRole",
             assumed_by=iam.ServicePrincipal("bedrock-agentcore.amazonaws.com"),
         )
+        runtime_name = f"{project_name}_{environment_name}".replace("-", "_")[:48]
+        runtime_log_group_arn = (
+            f"arn:{Aws.PARTITION}:logs:{Aws.REGION}:{Aws.ACCOUNT_ID}:"
+            f"log-group:/aws/bedrock-agentcore/runtimes/{runtime_name}-*"
+        )
+        runtime_role.add_to_policy(
+            iam.PolicyStatement(
+                actions=[
+                    "logs:CreateLogGroup",
+                    "logs:DescribeLogGroups",
+                    "logs:DescribeLogStreams",
+                    "logs:PutResourcePolicy",
+                ],
+                resources=[runtime_log_group_arn],
+            )
+        )
+        runtime_role.add_to_policy(
+            iam.PolicyStatement(
+                actions=["logs:CreateLogStream", "logs:PutLogEvents"],
+                resources=[f"{runtime_log_group_arn}:log-stream:*"],
+            )
+        )
         runtime_artifact = agentcore.AgentRuntimeArtifact.from_code_asset(
             path=str(PACKAGES / "agentcore"),
             runtime=agentcore.AgentCoreRuntime.PYTHON_3_12,
-            entrypoint=["python", "runtime_entrypoint.py"],
+            # A plain Python filename is the minimal direct-code entrypoint. Do not add
+            # ``opentelemetry-instrument`` unless aws-opentelemetry-distro is bundled.
+            entrypoint=["runtime_entrypoint.py"],
         )
         runtime = agentcore.Runtime(
             self,
             "ExtractionRuntime",
-            runtime_name=f"{project_name}_{environment_name}".replace("-", "_")[:48],
+            runtime_name=runtime_name,
             description="Asynchronous mutual-fund prospectus restriction extractor",
             agent_runtime_artifact=runtime_artifact,
             execution_role=runtime_role,
@@ -305,7 +319,9 @@ class ProspectusCoreStack(Stack):
                 "OUTPUT_VALIDATOR_NAME": output_validator.function_name,
                 "HEARTBEAT_SECONDS": "30",
             },
-            tracing_enabled=True,
+            # Direct-code tracing needs aws-opentelemetry-distro in the artifact.
+            # Keep it disabled for this minimal package; CloudWatch logs remain enabled.
+            tracing_enabled=False,
         )
 
         dispatch_function = function(
@@ -341,8 +357,8 @@ class ProspectusCoreStack(Stack):
         completion_bus.grant_put_events_to(reconcile_function)
         runtime_role.add_to_policy(
             iam.PolicyStatement(
-                actions=["bedrock:Converse", "bedrock:ConverseStream"],
-                resources=[f"arn:{Aws.PARTITION}:bedrock:{Aws.REGION}::foundation-model/*"],
+                actions=["bedrock:InvokeModel", "bedrock:InvokeModelWithResponseStream"],
+                resources=model_resource_arns,
             )
         )
         dispatch_function.add_to_role_policy(
@@ -488,7 +504,6 @@ class ProspectusCoreStack(Stack):
 
         self.api_url = http_api.api_endpoint
         self.api_id = http_api.api_id
-        self.ui_repository = ui_repository
         CfnOutput(self, "ApiBaseUrl", value=http_api.api_endpoint)
         CfnOutput(self, "ArtifactBucketName", value=artifact_bucket.bucket_name)
         CfnOutput(self, "JobsTableName", value=jobs_table.table_name)
@@ -497,5 +512,3 @@ class ProspectusCoreStack(Stack):
         CfnOutput(self, "InputValidatorArn", value=input_validator.function_arn)
         CfnOutput(self, "OutputValidatorArn", value=output_validator.function_arn)
         CfnOutput(self, "DashboardName", value=dashboard.dashboard_name)
-        CfnOutput(self, "UiRepositoryName", value=ui_repository.repository_name)
-        CfnOutput(self, "UiRepositoryUri", value=ui_repository.repository_uri)

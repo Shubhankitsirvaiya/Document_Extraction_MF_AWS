@@ -61,9 +61,9 @@ class GitHubOidcStack(Stack):
             ),
         )
 
-        # CDK's modern bootstrap creates dedicated lookup, file-publishing,
-        # image-publishing, and CloudFormation deployment roles. GitHub may assume only
-        # those account-local CDK roles instead of receiving AdministratorAccess itself.
+        # CDK's modern bootstrap creates dedicated lookup, file-publishing, and
+        # CloudFormation deployment roles. GitHub may assume only those account-local
+        # CDK roles instead of receiving AdministratorAccess itself.
         deployment_role.add_to_policy(
             iam.PolicyStatement(
                 actions=["sts:AssumeRole"],
@@ -90,31 +90,6 @@ class GitHubOidcStack(Stack):
                 resources=[
                     f"arn:{Aws.PARTITION}:ssm:{Aws.REGION}:{Aws.ACCOUNT_ID}:"
                     "parameter/cdk-bootstrap/hnb659fds/version"
-                ],
-            )
-        )
-
-        # Docker logs in with a registry-wide authorization token, then pushes only to
-        # the deterministic Streamlit repository created by the core application stack.
-        deployment_role.add_to_policy(
-            iam.PolicyStatement(actions=["ecr:GetAuthorizationToken"], resources=["*"])
-        )
-        deployment_role.add_to_policy(
-            iam.PolicyStatement(
-                actions=[
-                    "ecr:BatchCheckLayerAvailability",
-                    "ecr:BatchGetImage",
-                    "ecr:CompleteLayerUpload",
-                    "ecr:DescribeImages",
-                    "ecr:DescribeRepositories",
-                    "ecr:GetDownloadUrlForLayer",
-                    "ecr:InitiateLayerUpload",
-                    "ecr:PutImage",
-                    "ecr:UploadLayerPart",
-                ],
-                resources=[
-                    f"arn:{Aws.PARTITION}:ecr:{Aws.REGION}:{Aws.ACCOUNT_ID}:"
-                    f"repository/{project_name}-{environment_name}-ui"
                 ],
             )
         )

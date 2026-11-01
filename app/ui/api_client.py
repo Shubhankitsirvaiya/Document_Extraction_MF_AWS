@@ -26,7 +26,7 @@ class SignedApiClient:
         )
         self.session = session or boto3.Session(
             # On a developer machine, use the one-time configured named profile.
-            # In ECS, omit it so boto3 automatically uses short-lived task-role credentials.
+            # In any AWS-managed runtime, omit it so boto3 uses that runtime's IAM role.
             profile_name=None if running_with_aws_role else settings.aws_profile,
             region_name=settings.aws_region,
         )

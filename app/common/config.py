@@ -42,7 +42,6 @@ class Settings(BaseModel):
     artifact_retention_days: int = Field(default=7, ge=1, le=30)
     enable_secret_demo: bool = False
     enable_guardrail: bool = False
-    enable_ecs_ui: bool = True
     budget_usd: float = Field(default=10.0, gt=0)
     budget_email: str = ""
     api_base_url: str = ""

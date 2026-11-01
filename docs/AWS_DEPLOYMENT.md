@@ -9,7 +9,6 @@ explicit `cdk deploy` step. Use a sandbox account and review the synthesized tem
 . .\scripts\setup_aws_connection.ps1 `
   -Region ap-southeast-2 `
   -ExpectedAccountId "123456789012" `
-  -UiAllowedCidr "YOUR.PUBLIC.IP/32" `
   -AuthenticationMode login
 
 uv sync --group dev
@@ -24,17 +23,19 @@ the ignored `.env` file:
 - `AWS_PROFILE`: the named deployment profile.
 - `AWS_REGION`: the deployment region.
 - `EXPECTED_AWS_ACCOUNT_ID`: the verified 12-digit account.
-- `UI_ALLOWED_CIDR`: the public client address allowed to reach the AWS load balancer.
-- `APP_MODE=aws` and `ENABLE_ECS_UI=false` for local CDK review.
+- `APP_MODE=aws`: use the real AWS backend.
 
 Edit `.env` once more and provide:
 
 - `BEDROCK_MODEL_ID`: an exact vision-capable Bedrock model/inference-profile ID that
   you have enabled in that region. The application deliberately does not guess one.
+- `BEDROCK_MODEL_RESOURCE_ARNS`: the comma-separated inference-profile and underlying
+  foundation-model ARNs returned by `aws bedrock get-inference-profile`. These are
+  non-secret identifiers used to avoid wildcard model permissions.
 
 The AWS CLI stores browser-login metadata and temporary credentials in the Windows user
-profile. They must never be copied into `.env`, Git, Docker, ECS, or Lambda
-configuration. Deployed services use IAM roles automatically.
+profile. They must never be copied into `.env`, Git, or Lambda configuration. Deployed
+services use IAM roles automatically.
 
 For a later terminal session, the profile remains configured. Refresh login and restore
 the process selectors with:
@@ -64,8 +65,9 @@ Account verification is a hard safety gate. Re-run it before deployment or destr
 uv run python scripts/build_packages.py
 ```
 
-`uv` resolves Linux x86-64 wheels for Python 3.12 even when this command runs on
-Windows. The output under `generated/packages` is ignored by Git. Do not use
+`uv` resolves Linux x86-64 wheels for the Lambda packages and Linux ARM64 wheels for
+the AgentCore direct-code package, even when the command runs on Windows. The output
+under `generated/packages` is ignored by Git. Do not use
 `--skip-dependencies` for a real deployment; that option exists only for CDK tests.
 
 ## 4. Bootstrap and review CDK
@@ -91,12 +93,9 @@ one AWS deployment role whose trust policy is restricted to the exact GitHub rep
 then add these GitHub **Actions variables**:
 
 > **AWS Project account prerequisite:** the simplified AWS Project/free-plan environment
-> can apply organization Service Control Policies that deny CloudFormation stack
-> creation, ECR repositories, S3 buckets, and external IAM OIDC providers. In that case,
-> CDK bootstrap and GitHub OIDC cannot run until the account owner upgrades the account
-> and activates advanced AWS features. AWS documents that activation as irreversible;
-> it removes project spend limits and makes the owner responsible for normal usage
-> charges. Review billing, budgets, and idle resources before activating it.
+> can apply organization Service Control Policies that deny external IAM OIDC providers.
+> This account currently has that restriction, so local profile-based CDK deployment is
+> the supported path until AWS Support enables the capability.
 
 After advanced features are active, deploy the repository-scoped trust stack once:
 
@@ -117,12 +116,12 @@ npx cdk deploy `
 The resulting `GitHubDeploymentRoleArn` output becomes the
 `AWS_DEPLOY_ROLE_ARN` repository variable. Its trust policy accepts only the exact
 repository `main` branch. The role has no `AdministratorAccess` policy; it can assume
-the account-local CDK bootstrap roles and push only to the project's UI ECR repository.
+only the account-local CDK bootstrap roles needed for serverless deployment.
 
 - `AWS_ACCOUNT_ID`: the 12-digit project account.
 - `AWS_DEPLOY_ROLE_ARN`: the repository-scoped GitHub OIDC role.
 - `BEDROCK_MODEL_ID`: the verified Bedrock model or inference-profile ID.
-- `UI_ALLOWED_CIDR`: the administrator/classroom public address with `/32`.
+- `BEDROCK_MODEL_RESOURCE_ARNS`: comma-separated exact profile/model ARNs.
 
 The repository identity is required before creating the OIDC trust policy. Never use a
 wildcard repository owner and never store a permanent AWS access key in GitHub Secrets.
@@ -130,20 +129,17 @@ wildcard repository owner and never store a permanent AWS access key in GitHub S
 ## 6. Automatic CI versus manual deployment
 
 Every push and pull request runs `.github/workflows/ci.yml`. It runs lint/tests and
-builds `Dockerfile.ui` on a GitHub-hosted Docker runner. It does not log into AWS, push
-an image, or deploy resources.
+builds Linux Lambda/AgentCore packages. It does not log into AWS or deploy resources.
 
-To publish and deploy, open **Actions → Manual - Publish Image and Deploy AWS → Run
-workflow**, enter `DEPLOY`, and run it. The manual workflow:
+To deploy, open **Actions → Manual - Deploy Serverless AWS Backend → Run workflow**,
+enter `DEPLOY`, and run it. The manual workflow:
 
 1. authenticates to AWS with GitHub OIDC;
 2. runs tests and builds Linux Lambda/AgentCore packages;
-3. deploys the core stack, which creates the ECR repository;
-4. builds and pushes `repository:<full-git-commit-sha>`;
-5. deploys Fargate with that immutable image tag.
+3. deploys the serverless core stack.
 
-The explicit confirmation is intentional because the core stack, ALB, and Fargate
-service can incur AWS charges.
+The explicit confirmation is intentional because AWS resources and model calls can
+incur charges.
 
 ## 7. Optional local core deployment
 
@@ -165,21 +161,22 @@ npx cdk deploy "mf-prospectus-dev-core" `
   -c budget_usd=10
 ```
 
-This command deploys the serverless core and empty ECR repository. It does not build or
-deploy the UI. Docker is unnecessary locally because image building happens in GitHub.
+This command deploys only the serverless backend. The application stack has no container
+registry or container service. Standard CDK bootstrap tooling may create an empty asset
+ECR repository, but this application does not use it at runtime.
 
-## 8. Open the AWS-hosted UI
-
-Read the `UiUrl` stack output:
+## 8. Run the local UI against AWS
 
 ```powershell
-$outputs = Get-Content generated/ui-outputs.json | ConvertFrom-Json
-$outputs.'mf-prospectus-dev-ui'.UiUrl
+uv run python scripts/export_outputs.py generated/core-outputs.json
+$env:AWS_PROFILE = "mf-prospectus-deployer"
+$env:AWS_REGION = "ap-southeast-2"
+uv run mf-ui
 ```
 
-Open that URL from an IP inside `UI_ALLOWED_CIDR`. The Streamlit container receives
-short-lived ECS task-role credentials and signs API calls server-side. The browser never
-receives AWS credentials.
+Open the localhost URL printed by Streamlit. The server-side UI reads the exported API
+URL, loads temporary credentials from the named AWS profile, and signs requests with
+SigV4. The browser never receives AWS credentials.
 
 ## 9. Observe and evaluate
 
@@ -187,7 +184,7 @@ Use the stack output `DashboardName` in CloudWatch. Also inspect:
 
 - SQS intake queue age and DLQ depth;
 - API/dispatch/validator/reconcile Lambda logs and errors;
-- AgentCore managed runtime logs and X-Ray traces;
+- AgentCore managed runtime logs and Lambda X-Ray traces;
 - EventBridge completion log group;
 - DynamoDB job item status, attempt ID, heartbeat, and error fields.
 
@@ -201,11 +198,10 @@ Any live Bedrock evaluation must be an explicit, separately labelled operation.
 
 ## 10. Stop costs and destroy
 
-The core path has no always-on server, but retained S3/DynamoDB data and logs can still
-cost money. First remove any optional UI stack, then core infrastructure:
+The core path has no always-on EC2/ECS server, but requests, retained S3/DynamoDB data,
+logs, and model calls can still cost money. Remove the core infrastructure with:
 
 ```powershell
-npx cdk destroy "mf-prospectus-dev-ui"
 npx cdk destroy "mf-prospectus-dev-core"
 ```
 

@@ -1,4 +1,4 @@
-name: CI - Test and Build UI Image
+name: CI - Test and Package Serverless Backend
 
 on:
   push:
@@ -14,7 +14,7 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  test-and-build:
+  test-and-package:
     runs-on: ubuntu-latest
     timeout-minutes: 30
 
@@ -40,23 +40,10 @@ jobs:
           uv run ruff check .
           uv run pytest
 
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
-
-      - name: Build the Streamlit image without publishing it
-        uses: docker/build-push-action@v6
-        with:
-          context: .
-          file: Dockerfile.ui
-          push: false
-          tags: mf-prospectus-ui:${{ github.sha }}
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
-          labels: |
-            org.opencontainers.image.revision=${{ github.sha }}
-            org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
+      - name: Build Linux Lambda and AgentCore packages
+        run: uv run python scripts/build_packages.py
 
       - name: Explain the deployment boundary
         run: |
-          echo "Image mf-prospectus-ui:${GITHUB_SHA} built successfully in GitHub Actions."
-          echo "CI does not authenticate to AWS and does not create billable resources."
+          echo "Serverless packages built successfully for commit ${GITHUB_SHA}."
+          echo "CI does not authenticate to AWS and does not deploy resources."

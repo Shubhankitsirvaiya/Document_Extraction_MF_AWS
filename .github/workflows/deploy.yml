@@ -1,4 +1,4 @@
-name: Manual - Publish Image and Deploy AWS
+name: Manual - Deploy Serverless AWS Backend
 
 on:
   workflow_dispatch:
@@ -28,10 +28,10 @@ env:
   PROJECT_NAME: mf-prospectus
   ENVIRONMENT: dev
   BEDROCK_MODEL_ID: ${{ vars.BEDROCK_MODEL_ID }}
-  UI_ALLOWED_CIDR: ${{ vars.UI_ALLOWED_CIDR }}
+  BEDROCK_MODEL_RESOURCE_ARNS: ${{ vars.BEDROCK_MODEL_RESOURCE_ARNS }}
 
 jobs:
-  publish-and-deploy:
+  deploy:
     runs-on: ubuntu-latest
     timeout-minutes: 45
 
@@ -79,7 +79,7 @@ jobs:
           test -n "$AWS_ACCOUNT_ID" || { echo "Missing AWS_ACCOUNT_ID variable"; exit 1; }
           test -n "$AWS_ROLE_ARN" || { echo "Missing AWS_DEPLOY_ROLE_ARN variable"; exit 1; }
           test -n "$BEDROCK_MODEL_ID" || { echo "Missing BEDROCK_MODEL_ID variable"; exit 1; }
-          test -n "$UI_ALLOWED_CIDR" || { echo "Missing UI_ALLOWED_CIDR variable"; exit 1; }
+          test -n "$BEDROCK_MODEL_RESOURCE_ARNS" || { echo "Missing BEDROCK_MODEL_RESOURCE_ARNS variable"; exit 1; }
           aws sts get-caller-identity --query Account --output text | grep -Fx "$AWS_ACCOUNT_ID"
 
       - name: Install dependencies and run tests
@@ -92,62 +92,18 @@ jobs:
       - name: Build Linux Lambda and AgentCore packages
         run: uv run python scripts/build_packages.py
 
-      - name: Deploy core stack and create the ECR repository
-        env:
-          ENABLE_ECS_UI: "false"
+      - name: Deploy serverless core stack
         run: |
           npx cdk deploy "${PROJECT_NAME}-${ENVIRONMENT}-core" \
             --require-approval never \
             --outputs-file generated/core-outputs.json
-
-      - name: Read the ECR repository from CloudFormation
-        id: repository
-        shell: bash
-        run: |
-          REPOSITORY_URI="$(aws cloudformation describe-stacks \
-            --stack-name "${PROJECT_NAME}-${ENVIRONMENT}-core" \
-            --query "Stacks[0].Outputs[?OutputKey=='UiRepositoryUri'].OutputValue | [0]" \
-            --output text)"
-          test -n "$REPOSITORY_URI" && test "$REPOSITORY_URI" != "None"
-          echo "uri=$REPOSITORY_URI" >> "$GITHUB_OUTPUT"
-
-      - name: Log in to Amazon ECR
-        uses: aws-actions/amazon-ecr-login@v2
-
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
-
-      - name: Build and publish immutable commit image
-        uses: docker/build-push-action@v6
-        with:
-          context: .
-          file: Dockerfile.ui
-          push: true
-          tags: ${{ steps.repository.outputs.uri }}:${{ github.sha }}
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
-          provenance: true
-          sbom: true
-          labels: |
-            org.opencontainers.image.revision=${{ github.sha }}
-            org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
-
-      - name: Deploy Fargate UI using this commit image
-        env:
-          ENABLE_ECS_UI: "true"
-          UI_IMAGE_TAG: ${{ github.sha }}
-        run: |
-          npx cdk deploy "${PROJECT_NAME}-${ENVIRONMENT}-ui" \
-            --require-approval never \
-            --outputs-file generated/ui-outputs.json
 
       - name: Publish deployment summary
         shell: bash
         run: |
           {
             echo "## AWS deployment completed"
-            echo "- Image: \`${{ steps.repository.outputs.uri }}:${GITHUB_SHA}\`"
+            echo "- Commit: \`${GITHUB_SHA}\`"
             echo "- Region: \`${AWS_REGION}\`"
             echo "- Core stack: \`${PROJECT_NAME}-${ENVIRONMENT}-core\`"
-            echo "- UI stack: \`${PROJECT_NAME}-${ENVIRONMENT}-ui\`"
           } >> "$GITHUB_STEP_SUMMARY"

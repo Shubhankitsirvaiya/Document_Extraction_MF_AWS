@@ -6,13 +6,13 @@ Configures the one-time developer connection used to deploy this AWS-only projec
 The script creates or reuses one named AWS CLI profile, verifies the target account,
 and writes only non-secret deployment selectors to the project's ignored .env file.
 AWS credentials remain in the standard per-user AWS CLI location. After deployment,
-Lambda, AgentCore, and ECS use IAM roles; no local key is copied into AWS containers.
+Lambda and AgentCore use IAM roles; no local key is copied into deployed workloads.
 
 Run this script by dot-sourcing it so the AWS_PROFILE variables remain in the current
 PowerShell session:
 
   . .\scripts\setup_aws_connection.ps1 -Region ap-southeast-2 `
-      -UiAllowedCidr "203.0.113.10/32" -AuthenticationMode login
+      -ExpectedAccountId "123456789012" -AuthenticationMode login
 #>
 
 [CmdletBinding()]
@@ -25,9 +25,6 @@ param(
     [Parameter(Mandatory = $true)]
     [ValidatePattern("^[0-9]{12}$")]
     [string]$ExpectedAccountId,
-
-    [Parameter(Mandatory = $true)]
-    [string]$UiAllowedCidr,
 
     [ValidateSet("login", "sso", "access-key")]
     [string]$AuthenticationMode = "login"
@@ -137,8 +134,6 @@ Set-ProjectEnvValue -Name "APP_MODE" -Value "aws"
 Set-ProjectEnvValue -Name "AWS_PROFILE" -Value $ProfileName
 Set-ProjectEnvValue -Name "AWS_REGION" -Value $Region
 Set-ProjectEnvValue -Name "EXPECTED_AWS_ACCOUNT_ID" -Value $verifiedAccountId
-Set-ProjectEnvValue -Name "UI_ALLOWED_CIDR" -Value $UiAllowedCidr
-Set-ProjectEnvValue -Name "ENABLE_ECS_UI" -Value "true"
 
 # Because this script is dot-sourced, these variables remain available to AWS CLI,
 # boto3, and CDK commands executed later in the same PowerShell window.
@@ -147,7 +142,6 @@ $env:AWS_REGION = $Region
 $env:CDK_DEFAULT_REGION = $Region
 $env:CDK_DEFAULT_ACCOUNT = $verifiedAccountId
 $env:EXPECTED_AWS_ACCOUNT_ID = $verifiedAccountId
-$env:UI_ALLOWED_CIDR = $UiAllowedCidr
 
 Write-Host "AWS connection configured successfully."
 Write-Host "Profile : $ProfileName"

@@ -14,7 +14,10 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 OUTPUT = ROOT / "generated" / "packages"
-PLATFORM = "x86_64-manylinux_2_28"
+LAMBDA_PLATFORM = "x86_64-manylinux_2_28"
+# AgentCore direct-code runtimes use Linux ARM64 even though the five Lambda functions
+# in this project deliberately use x86-64. Native wheels must match each compute target.
+AGENTCORE_PLATFORM = "aarch64-manylinux2014"
 PYTHON_VERSION = "3.12"
 
 PACKAGE_DEPENDENCIES = {
@@ -67,6 +70,9 @@ def build(package_names: list[str], *, skip_dependencies: bool = False) -> None:
         destination.mkdir(parents=True)
 
         if not skip_dependencies:
+            target_platform = (
+                AGENTCORE_PLATFORM if package_name == "agentcore" else LAMBDA_PLATFORM
+            )
             command = [
                 "uv",
                 "pip",
@@ -74,7 +80,7 @@ def build(package_names: list[str], *, skip_dependencies: bool = False) -> None:
                 "--target",
                 str(destination),
                 "--python-platform",
-                PLATFORM,
+                target_platform,
                 "--python-version",
                 PYTHON_VERSION,
                 "--only-binary",
